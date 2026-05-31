@@ -80,6 +80,13 @@ npm run dev
 
 Open `http://127.0.0.1:5173`.
 
+On Windows you can also run:
+
+1. `start-backend.cmd`
+2. `start-frontend.cmd`
+
+Keep both terminal windows open while using the app.
+
 ## Old static prototype
 
 The first static prototype is kept in `prototype/index.html`.
