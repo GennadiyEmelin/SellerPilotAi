@@ -28,6 +28,17 @@ app.MapGet("/api/integrations/status", async (MarketplaceDataService marketplace
     return Results.Ok(await marketplaceData.GetStatusAsync());
 });
 
+app.MapGet("/api/integrations/ozon/credentials", (MarketplaceDataService marketplaceData) =>
+{
+    return Results.Ok(marketplaceData.GetOzonCredentialsStatus());
+});
+
+app.MapPut("/api/integrations/ozon/credentials", async (OzonCredentialsRequest request, MarketplaceDataService marketplaceData) =>
+{
+    await marketplaceData.SaveOzonCredentialsAsync(request);
+    return Results.Ok(marketplaceData.GetOzonCredentialsStatus());
+});
+
 app.MapPost("/api/integrations/sync", async (MarketplaceDataService marketplaceData) =>
 {
     var result = await marketplaceData.SyncAsync();
@@ -218,6 +229,10 @@ record DashboardResponse(
 
 record OzonOptions(string BaseUrl, string ClientId, string ApiKey);
 
+record OzonCredentialsRequest(string ClientId, string ApiKey);
+
+record OzonCredentialsStatus(bool Configured, string ClientIdPreview);
+
 record OzonProductIdentity(long ProductId, string OfferId);
 
 record IntegrationStatus(string Marketplace, bool Configured, bool Available, string Message);
@@ -229,6 +244,7 @@ record DashboardSource(IReadOnlyList<Product> Products, string Source, IReadOnly
 sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfiguration configuration, ILogger<MarketplaceDataService> logger)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly string secretsPath = Path.Combine(AppContext.BaseDirectory, "secrets", "ozon.local.json");
 
     public async Task<IReadOnlyList<IntegrationStatus>> GetStatusAsync()
     {
@@ -246,6 +262,32 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         }
 
         return new SyncResult(statuses, importedItems);
+    }
+
+    public OzonCredentialsStatus GetOzonCredentialsStatus()
+    {
+        var options = GetOzonOptions();
+        return new OzonCredentialsStatus(
+            !string.IsNullOrWhiteSpace(options.ClientId) && !string.IsNullOrWhiteSpace(options.ApiKey),
+            Preview(options.ClientId));
+    }
+
+    public async Task SaveOzonCredentialsAsync(OzonCredentialsRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ClientId) || string.IsNullOrWhiteSpace(request.ApiKey))
+        {
+            throw new BadHttpRequestException("Client-Id и Api-Key обязательны.");
+        }
+
+        var directory = Path.GetDirectoryName(secretsPath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        await File.WriteAllTextAsync(
+            secretsPath,
+            JsonSerializer.Serialize(new OzonOptions("https://api-seller.ozon.ru", request.ClientId.Trim(), request.ApiKey.Trim()), JsonOptions));
     }
 
     public async Task<DashboardSource> GetDashboardSourceAsync()
@@ -308,10 +350,31 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
     private OzonOptions GetOzonOptions()
     {
         var section = configuration.GetSection("MarketplaceApi:Ozon");
+        var localOptions = ReadLocalOzonOptions();
+
         return new OzonOptions(
-            Environment.GetEnvironmentVariable("OZON_BASE_URL") ?? section["BaseUrl"] ?? "https://api-seller.ozon.ru",
-            Environment.GetEnvironmentVariable("OZON_CLIENT_ID") ?? section["ClientId"] ?? "",
-            Environment.GetEnvironmentVariable("OZON_API_KEY") ?? section["ApiKey"] ?? "");
+            Environment.GetEnvironmentVariable("OZON_BASE_URL") ?? localOptions?.BaseUrl ?? section["BaseUrl"] ?? "https://api-seller.ozon.ru",
+            Environment.GetEnvironmentVariable("OZON_CLIENT_ID") ?? localOptions?.ClientId ?? section["ClientId"] ?? "",
+            Environment.GetEnvironmentVariable("OZON_API_KEY") ?? localOptions?.ApiKey ?? section["ApiKey"] ?? "");
+    }
+
+    private OzonOptions? ReadLocalOzonOptions()
+    {
+        if (!File.Exists(secretsPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var json = File.ReadAllText(secretsPath);
+            return JsonSerializer.Deserialize<OzonOptions>(json, JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to read local Ozon credentials");
+            return null;
+        }
     }
 
     private async Task<IReadOnlyList<Product>> FetchOzonProductsAsync()
@@ -494,6 +557,16 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         }
 
         return value.Length <= 220 ? value : value[..220];
+    }
+
+    private static string Preview(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "";
+        }
+
+        return value.Length <= 4 ? "****" : $"{value[..Math.Min(4, value.Length)]}***";
     }
 
     private static string GetString(JsonElement element, string propertyName)

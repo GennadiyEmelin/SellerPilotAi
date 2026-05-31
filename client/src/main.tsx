@@ -1,7 +1,18 @@
 import { StrictMode } from "react";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { AlertTriangle, BarChart3, Bot, CheckCircle2, Link2, PackageCheck, RefreshCw, Upload } from "lucide-react";
+import {
+  AlertTriangle,
+  BarChart3,
+  Bot,
+  CheckCircle2,
+  KeyRound,
+  Link2,
+  PackageCheck,
+  RefreshCw,
+  Save,
+  Upload
+} from "lucide-react";
 import "./styles.css";
 
 type ProductMetrics = {
@@ -48,6 +59,11 @@ type IntegrationStatus = {
   message: string;
 };
 
+type OzonCredentialsStatus = {
+  configured: boolean;
+  clientIdPreview: string;
+};
+
 const currency = new Intl.NumberFormat("ru-RU", {
   style: "currency",
   currency: "RUB",
@@ -57,6 +73,7 @@ const currency = new Intl.NumberFormat("ru-RU", {
 function App() {
   const [dashboard, setDashboard] = useDashboard();
   const [integrations, refreshIntegrations] = useIntegrations();
+  const [activeSection, setActiveSection] = useState<"overview" | "integrations">("overview");
   const [filter, setFilter] = useState<"all" | "risk" | "profit">("all");
 
   if (!dashboard) {
@@ -86,9 +103,16 @@ function App() {
         </div>
 
         <nav className="nav" aria-label="Разделы">
-          {["Обзор", "Товары", "Поставки", "Реклама", "Задачи"].map((item, index) => (
-            <button className={index === 0 ? "active" : ""} key={item}>
-              {item}
+          {[
+            { key: "overview", label: "Обзор" },
+            { key: "integrations", label: "Интеграции" }
+          ].map((item) => (
+            <button
+              className={activeSection === item.key ? "active" : ""}
+              key={item.key}
+              onClick={() => setActiveSection(item.key as "overview" | "integrations")}
+            >
+              {item.label}
             </button>
           ))}
         </nav>
@@ -101,6 +125,14 @@ function App() {
       </aside>
 
       <section className="workspace">
+        {activeSection === "integrations" ? (
+          <IntegrationsView
+            integrations={integrations}
+            refreshIntegrations={refreshIntegrations}
+            reloadDashboard={() => setDashboard(null)}
+          />
+        ) : (
+          <>
         <header className="topbar">
           <div>
             <p className="eyebrow">31 мая 2026</p>
@@ -200,6 +232,8 @@ function App() {
           </div>
           <ProductTable products={filteredProducts} />
         </section>
+          </>
+        )}
       </section>
     </main>
   );
@@ -260,6 +294,131 @@ function useIntegrations(): [IntegrationStatus[], () => void] {
   }, [version]);
 
   return [integrations, () => setVersion((current) => current + 1)];
+}
+
+function IntegrationsView({
+  integrations,
+  refreshIntegrations,
+  reloadDashboard
+}: {
+  integrations: IntegrationStatus[];
+  refreshIntegrations: () => void;
+  reloadDashboard: () => void;
+}) {
+  const [clientId, setClientId] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [status, setStatus] = useState<OzonCredentialsStatus | null>(null);
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/integrations/ozon/credentials")
+      .then((response) => {
+        if (!response.ok) throw new Error("Credentials request failed");
+        return response.json() as Promise<OzonCredentialsStatus>;
+      })
+      .then((data) => {
+        if (alive) setStatus(data);
+      })
+      .catch(() => {
+        if (alive) setMessage("Backend недоступен. Запустите сервер и повторите.");
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [saving]);
+
+  const saveCredentials = async () => {
+    setSaving(true);
+    setMessage("");
+
+    try {
+      const response = await fetch("/api/integrations/ozon/credentials", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId, apiKey })
+      });
+
+      if (!response.ok) throw new Error(await response.text());
+
+      const data = (await response.json()) as OzonCredentialsStatus;
+      setStatus(data);
+      setClientId("");
+      setApiKey("");
+      setMessage("Ключи сохранены локально. Теперь можно проверить подключение.");
+      refreshIntegrations();
+      reloadDashboard();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Не удалось сохранить ключи.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="settingsPage">
+      <header className="topbar">
+        <div>
+          <p className="eyebrow">Настройки</p>
+          <h1>Подключение Ozon Seller API</h1>
+        </div>
+      </header>
+
+      <section className="settingsGrid">
+        <article className="panel">
+          <SectionHeading eyebrow="Ключи" title="Доступ к кабинету Ozon" />
+          <div className="credentialsForm">
+            <label>
+              <span>Client-Id</span>
+              <input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="Например: 123456" />
+            </label>
+            <label>
+              <span>Api-Key</span>
+              <input
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder="Вставьте API-ключ"
+                type="password"
+              />
+            </label>
+            <button className="primaryButton" onClick={saveCredentials} disabled={saving}>
+              <Save aria-hidden="true" />
+              {saving ? "Сохраняем" : "Сохранить ключи"}
+            </button>
+            {message ? <p className="formMessage">{message}</p> : null}
+          </div>
+        </article>
+
+        <article className="panel">
+          <SectionHeading eyebrow="Статус" title="Проверка подключения" />
+          <div className="settingsStatus">
+            <div className={`credentialBadge ${status?.configured ? "online" : "offline"}`}>
+              <KeyRound aria-hidden="true" />
+              <span>
+                <strong>{status?.configured ? "Ключи сохранены" : "Ключи не сохранены"}</strong>
+                <small>{status?.clientIdPreview ? `Client-Id: ${status.clientIdPreview}` : "Данные хранятся только локально на этом компьютере."}</small>
+              </span>
+            </div>
+            {integrations.map((item) => (
+              <div className={`integration ${item.available ? "online" : "offline"}`} key={item.marketplace}>
+                <Link2 aria-hidden="true" />
+                <span>
+                  <strong>{item.marketplace}</strong>
+                  <small>{item.message}</small>
+                </span>
+              </div>
+            ))}
+            <button className="ghostButton" onClick={refreshIntegrations}>
+              <RefreshCw aria-hidden="true" />
+              Проверить Ozon
+            </button>
+          </div>
+        </article>
+      </section>
+    </section>
+  );
 }
 
 function Metric({ label, value, note, warning = false }: { label: string; value: string; note: string; warning?: boolean }) {

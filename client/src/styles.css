@@ -27,6 +27,30 @@ button {
   font: inherit;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+input {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fff;
+  font: inherit;
+}
+
+label span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .app {
   display: grid;
   grid-template-columns: 280px 1fr;
@@ -247,6 +271,62 @@ h2 {
 }
 
 .integration.offline svg {
+  color: var(--amber);
+}
+
+.settingsPage {
+  display: grid;
+  gap: 18px;
+}
+
+.settingsGrid {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(300px, 0.8fr);
+  gap: 18px;
+}
+
+.credentialsForm,
+.settingsStatus {
+  display: grid;
+  gap: 14px;
+}
+
+.formMessage {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.credentialBadge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f7faf7;
+}
+
+.credentialBadge svg {
+  width: 18px;
+  height: 18px;
+}
+
+.credentialBadge strong,
+.credentialBadge small {
+  display: block;
+}
+
+.credentialBadge small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.credentialBadge.online svg {
+  color: var(--green);
+}
+
+.credentialBadge.offline svg {
   color: var(--amber);
 }
 
@@ -481,6 +561,10 @@ th {
   }
 
   .integrations {
+    grid-template-columns: 1fr;
+  }
+
+  .settingsGrid {
     grid-template-columns: 1fr;
   }
 }
