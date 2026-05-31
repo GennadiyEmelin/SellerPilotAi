@@ -235,6 +235,8 @@ record OzonCredentialsStatus(bool Configured, string ClientIdPreview);
 
 record OzonProductIdentity(long ProductId, string OfferId);
 
+record OzonSalesMetrics(string Sku, string Name, int Sold, decimal Revenue);
+
 record IntegrationStatus(string Marketplace, bool Configured, bool Available, string Message);
 
 record SyncResult(IReadOnlyList<IntegrationStatus> Statuses, IReadOnlyList<string> ImportedItems);
@@ -391,7 +393,10 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
             return [];
         }
 
-        return await FetchOzonProductInfoAsync(options, identities);
+        var products = await FetchOzonProductInfoAsync(options, identities);
+        var sales = await FetchOzonSalesMetricsAsync(options);
+
+        return MergeProductsWithSales(products, sales);
     }
 
     private async Task<IReadOnlyList<OzonProductIdentity>> FetchOzonProductIdsAsync(OzonOptions options)
@@ -497,12 +502,8 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         {
             var offerId = GetString(item, "offer_id");
             var productId = GetString(item, "id");
-            var sku = string.IsNullOrWhiteSpace(offerId) ? productId : offerId;
-
-            if (string.IsNullOrWhiteSpace(sku))
-            {
-                sku = GetString(item, "product_id");
-            }
+            var ozonSku = GetString(item, "sku");
+            var sku = FirstNotEmpty(ozonSku, offerId, productId, GetString(item, "product_id"));
 
             var name = GetString(item, "name");
             var price = GetPrice(item);
@@ -523,6 +524,135 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         }
 
         return products;
+    }
+
+    private async Task<IReadOnlyList<OzonSalesMetrics>> FetchOzonSalesMetricsAsync(OzonOptions options)
+    {
+        var dateTo = DateOnly.FromDateTime(DateTime.UtcNow);
+        var dateFrom = dateTo.AddDays(-30);
+        var request = CreateOzonRequest(options, "/v1/analytics/data", new
+        {
+            date_from = dateFrom.ToString("yyyy-MM-dd"),
+            date_to = dateTo.ToString("yyyy-MM-dd"),
+            metrics = new[] { "revenue", "ordered_units" },
+            dimension = new[] { "sku" },
+            filters = Array.Empty<object>(),
+            sort = new[]
+            {
+                new { key = "revenue", order = "DESC" }
+            },
+            limit = 1000,
+            offset = 0
+        });
+
+        using var response = await httpClientFactory.CreateClient().SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            logger.LogWarning("Ozon analytics data failed: {StatusCode} {Body}", response.StatusCode, Trim(body));
+            return [];
+        }
+
+        return ParseOzonSalesMetrics(body);
+    }
+
+    private static IReadOnlyList<Product> MergeProductsWithSales(
+        IReadOnlyList<Product> products,
+        IReadOnlyList<OzonSalesMetrics> sales)
+    {
+        if (sales.Count == 0)
+        {
+            return products;
+        }
+
+        var salesBySku = sales
+            .GroupBy(item => item.Sku, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        var productsBySku = products.ToDictionary(item => item.Sku, StringComparer.OrdinalIgnoreCase);
+        var merged = new List<Product>();
+
+        foreach (var product in products)
+        {
+            if (!salesBySku.TryGetValue(product.Sku, out var metric))
+            {
+                merged.Add(product);
+                continue;
+            }
+
+            var averagePrice = metric.Sold > 0 ? metric.Revenue / metric.Sold : product.Price;
+            merged.Add(product with
+            {
+                Sold = metric.Sold,
+                Price = averagePrice
+            });
+        }
+
+        foreach (var metric in sales)
+        {
+            if (productsBySku.ContainsKey(metric.Sku))
+            {
+                continue;
+            }
+
+            var averagePrice = metric.Sold > 0 ? metric.Revenue / metric.Sold : 0;
+            merged.Add(new Product(
+                metric.Sku,
+                string.IsNullOrWhiteSpace(metric.Name) ? $"Ozon SKU {metric.Sku}" : metric.Name,
+                metric.Sold,
+                averagePrice,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0));
+        }
+
+        return merged
+            .OrderByDescending(item => item.Sold * item.Price)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<OzonSalesMetrics> ParseOzonSalesMetrics(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var data = GetDataArray(document.RootElement);
+        if (data.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var result = new List<OzonSalesMetrics>();
+        foreach (var row in data.EnumerateArray())
+        {
+            if (!row.TryGetProperty("dimensions", out var dimensions) ||
+                dimensions.ValueKind != JsonValueKind.Array ||
+                dimensions.GetArrayLength() == 0)
+            {
+                continue;
+            }
+
+            var dimension = dimensions[0];
+            var sku = FirstNotEmpty(GetString(dimension, "id"), GetString(dimension, "value"), GetString(dimension, "name"));
+            if (string.IsNullOrWhiteSpace(sku))
+            {
+                continue;
+            }
+
+            var name = GetString(dimension, "name");
+            var revenue = 0m;
+            var sold = 0;
+            if (row.TryGetProperty("metrics", out var metrics) && metrics.ValueKind == JsonValueKind.Array)
+            {
+                revenue = GetDecimalAt(metrics, 0);
+                sold = (int)Math.Round(GetDecimalAt(metrics, 1));
+            }
+
+            result.Add(new OzonSalesMetrics(sku, name, sold, revenue));
+        }
+
+        return result;
     }
 
     private static Product EmptyProduct(string sku)
@@ -582,6 +712,22 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
             JsonValueKind.Number => property.GetRawText(),
             _ => ""
         };
+    }
+
+    private static JsonElement GetDataArray(JsonElement root)
+    {
+        if (root.TryGetProperty("result", out var result) &&
+            result.TryGetProperty("data", out var resultData))
+        {
+            return resultData;
+        }
+
+        if (root.TryGetProperty("data", out var data))
+        {
+            return data;
+        }
+
+        return default;
     }
 
     private static long GetLong(JsonElement element, string propertyName)
@@ -659,6 +805,27 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         return 0;
     }
 
+    private static decimal GetDecimalAt(JsonElement array, int index)
+    {
+        if (array.ValueKind != JsonValueKind.Array || array.GetArrayLength() <= index)
+        {
+            return 0;
+        }
+
+        var value = array[index];
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetDecimal(out var number))
+        {
+            return number;
+        }
+
+        if (value.ValueKind == JsonValueKind.String && decimal.TryParse(value.GetString(), out number))
+        {
+            return number;
+        }
+
+        return 0;
+    }
+
     private static int GetInt(JsonElement element, string propertyName)
     {
         if (!element.TryGetProperty(propertyName, out var property))
@@ -677,5 +844,10 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         }
 
         return 0;
+    }
+
+    private static string FirstNotEmpty(params string[] values)
+    {
+        return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "";
     }
 }
