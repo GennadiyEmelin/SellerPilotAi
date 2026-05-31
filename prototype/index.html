@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SellerPilot AI</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">SP</div>
+          <div>
+            <strong>SellerPilot AI</strong>
+            <span>Операционный помощник</span>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Разделы">
+          <button class="nav-item active">Обзор</button>
+          <button class="nav-item">Товары</button>
+          <button class="nav-item">Поставки</button>
+          <button class="nav-item">Реклама</button>
+          <button class="nav-item">Задачи</button>
+        </nav>
+
+        <section class="side-panel">
+          <span class="label">Тариф</span>
+          <strong>Growth</strong>
+          <p>До 1 000 SKU, прогноз остатков, рекомендации и Telegram-уведомления.</p>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">31 мая 2026</p>
+            <h1>Что сделать сегодня, чтобы прибыль не просела</h1>
+          </div>
+          <div class="actions">
+            <button class="ghost-button" id="simulateButton">Обновить расчет</button>
+            <button class="primary-button">Загрузить отчет</button>
+          </div>
+        </header>
+
+        <section class="metrics" aria-label="Ключевые показатели">
+          <article class="metric">
+            <span>Выручка</span>
+            <strong id="revenueMetric">0 ₽</strong>
+            <small>за 30 дней</small>
+          </article>
+          <article class="metric">
+            <span>Чистая прибыль</span>
+            <strong id="profitMetric">0 ₽</strong>
+            <small id="profitDelta">после всех расходов</small>
+          </article>
+          <article class="metric">
+            <span>Средняя маржа</span>
+            <strong id="marginMetric">0%</strong>
+            <small>по активным SKU</small>
+          </article>
+          <article class="metric warning">
+            <span>Рискованные SKU</span>
+            <strong id="riskMetric">0</strong>
+            <small>требуют решения</small>
+          </article>
+        </section>
+
+        <section class="grid">
+          <article class="assistant-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">AI-помощник</p>
+                <h2>Рекомендации на сегодня</h2>
+              </div>
+              <span class="status-dot">live</span>
+            </div>
+            <div class="recommendations" id="recommendations"></div>
+          </article>
+
+          <article class="tasks-panel">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Операционка</p>
+                <h2>Задачи</h2>
+              </div>
+            </div>
+            <div class="tasks" id="tasks"></div>
+          </article>
+        </section>
+
+        <section class="table-section">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">SKU</p>
+              <h2>Прибыль по товарам</h2>
+            </div>
+            <div class="filter-group" role="group" aria-label="Фильтр товаров">
+              <button class="filter active" data-filter="all">Все</button>
+              <button class="filter" data-filter="risk">Риск</button>
+              <button class="filter" data-filter="profit">Прибыль</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Товар</th>
+                  <th>Продано</th>
+                  <th>Выручка</th>
+                  <th>Расходы</th>
+                  <th>Прибыль</th>
+                  <th>Маржа</th>
+                  <th>Остаток</th>
+                  <th>Сигнал</th>
+                </tr>
+              </thead>
+              <tbody id="skuTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
