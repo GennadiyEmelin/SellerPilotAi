@@ -92,10 +92,10 @@ static ProductMetrics Calculate(Product item)
 {
     var grossRevenue = item.Sold * item.Price;
     var returnLoss = grossRevenue * item.ReturnRate;
-    var commission = grossRevenue * item.CommissionRate;
-    var logistics = item.Sold * item.LogisticsCost;
+    var commission = item.CommissionExpense;
+    var logistics = item.LogisticsExpense;
     var purchaseCost = item.Sold * item.PurchaseCost;
-    var expenses = purchaseCost + commission + logistics + item.AdSpend + returnLoss;
+    var expenses = purchaseCost + commission + logistics + item.ServicesExpense + item.ReturnExpense + returnLoss;
     var profit = grossRevenue - expenses;
     var margin = grossRevenue > 0 ? profit / grossRevenue : 0;
     var stockDays = item.DailySales > 0 ? (decimal)item.Stock / item.DailySales : 999;
@@ -109,6 +109,10 @@ static ProductMetrics Calculate(Product item)
         item.Stock,
         grossRevenue,
         expenses,
+        commission,
+        logistics,
+        item.ServicesExpense,
+        item.ReturnExpense,
         profit,
         margin,
         stockDays,
@@ -192,9 +196,10 @@ record Product(
     int Sold,
     decimal Price,
     decimal PurchaseCost,
-    decimal CommissionRate,
-    decimal LogisticsCost,
-    decimal AdSpend,
+    decimal CommissionExpense,
+    decimal LogisticsExpense,
+    decimal ServicesExpense,
+    decimal ReturnExpense,
     decimal ReturnRate,
     int Stock,
     int DailySales);
@@ -207,6 +212,10 @@ record ProductMetrics(
     int Stock,
     decimal GrossRevenue,
     decimal Expenses,
+    decimal CommissionExpense,
+    decimal LogisticsExpense,
+    decimal ServicesExpense,
+    decimal ReturnExpense,
     decimal Profit,
     decimal Margin,
     decimal StockDays,
@@ -236,6 +245,13 @@ record OzonCredentialsStatus(bool Configured, string ClientIdPreview);
 record OzonProductIdentity(long ProductId, string OfferId);
 
 record OzonSalesMetrics(string Sku, string Name, int Sold, decimal Revenue);
+
+record OzonFinanceMetrics(
+    string Sku,
+    decimal CommissionExpense,
+    decimal LogisticsExpense,
+    decimal ServicesExpense,
+    decimal ReturnExpense);
 
 record IntegrationStatus(string Marketplace, bool Configured, bool Available, string Message);
 
@@ -395,8 +411,9 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
 
         var products = await FetchOzonProductInfoAsync(options, identities);
         var sales = await FetchOzonSalesMetricsAsync(options);
+        var finance = await FetchOzonFinanceMetricsAsync(options);
 
-        return MergeProductsWithSales(products, sales);
+        return MergeProducts(products, sales, finance);
     }
 
     private async Task<IReadOnlyList<OzonProductIdentity>> FetchOzonProductIdsAsync(OzonOptions options)
@@ -519,6 +536,7 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
                 0,
                 0,
                 0,
+                0,
                 stock,
                 0));
         }
@@ -556,11 +574,69 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         return ParseOzonSalesMetrics(body);
     }
 
-    private static IReadOnlyList<Product> MergeProductsWithSales(
-        IReadOnlyList<Product> products,
-        IReadOnlyList<OzonSalesMetrics> sales)
+    private async Task<IReadOnlyList<OzonFinanceMetrics>> FetchOzonFinanceMetricsAsync(OzonOptions options)
     {
-        if (sales.Count == 0)
+        var dateTo = DateTime.UtcNow;
+        var dateFrom = dateTo.AddDays(-30);
+        var result = new List<OzonFinanceMetrics>();
+
+        for (var page = 1; page <= 10; page++)
+        {
+            var request = CreateOzonRequest(options, "/v3/finance/transaction/list", new
+            {
+                filter = new
+                {
+                    date = new
+                    {
+                        from = dateFrom.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                        to = dateTo.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+                    },
+                    operation_type = Array.Empty<string>(),
+                    posting_number = "",
+                    transaction_type = "all"
+                },
+                page,
+                page_size = 1000
+            });
+
+            using var response = await httpClientFactory.CreateClient().SendAsync(request);
+            var body = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogWarning("Ozon finance transactions failed: {StatusCode} {Body}", response.StatusCode, Trim(body));
+                break;
+            }
+
+            var pageItems = ParseOzonFinanceMetrics(body);
+            if (pageItems.Count == 0)
+            {
+                break;
+            }
+
+            result.AddRange(pageItems);
+            if (!HasNextFinancePage(body, page))
+            {
+                break;
+            }
+        }
+
+        return result
+            .GroupBy(item => item.Sku, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new OzonFinanceMetrics(
+                group.Key,
+                group.Sum(item => item.CommissionExpense),
+                group.Sum(item => item.LogisticsExpense),
+                group.Sum(item => item.ServicesExpense),
+                group.Sum(item => item.ReturnExpense)))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<Product> MergeProducts(
+        IReadOnlyList<Product> products,
+        IReadOnlyList<OzonSalesMetrics> sales,
+        IReadOnlyList<OzonFinanceMetrics> finance)
+    {
+        if (sales.Count == 0 && finance.Count == 0)
         {
             return products;
         }
@@ -568,22 +644,32 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         var salesBySku = sales
             .GroupBy(item => item.Sku, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        var financeBySku = finance
+            .GroupBy(item => item.Sku, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         var productsBySku = products.ToDictionary(item => item.Sku, StringComparer.OrdinalIgnoreCase);
         var merged = new List<Product>();
 
         foreach (var product in products)
         {
-            if (!salesBySku.TryGetValue(product.Sku, out var metric))
+            salesBySku.TryGetValue(product.Sku, out var salesMetric);
+            financeBySku.TryGetValue(product.Sku, out var financeMetric);
+
+            if (salesMetric is null && financeMetric is null)
             {
                 merged.Add(product);
                 continue;
             }
 
-            var averagePrice = metric.Sold > 0 ? metric.Revenue / metric.Sold : product.Price;
+            var averagePrice = salesMetric?.Sold > 0 ? salesMetric.Revenue / salesMetric.Sold : product.Price;
             merged.Add(product with
             {
-                Sold = metric.Sold,
-                Price = averagePrice
+                Sold = salesMetric?.Sold ?? product.Sold,
+                Price = averagePrice,
+                CommissionExpense = financeMetric?.CommissionExpense ?? product.CommissionExpense,
+                LogisticsExpense = financeMetric?.LogisticsExpense ?? product.LogisticsExpense,
+                ServicesExpense = financeMetric?.ServicesExpense ?? product.ServicesExpense,
+                ReturnExpense = financeMetric?.ReturnExpense ?? product.ReturnExpense
             });
         }
 
@@ -604,6 +690,29 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
                 0,
                 0,
                 0,
+                0,
+                0,
+                0,
+                0));
+        }
+
+        foreach (var metric in finance)
+        {
+            if (productsBySku.ContainsKey(metric.Sku) || salesBySku.ContainsKey(metric.Sku))
+            {
+                continue;
+            }
+
+            merged.Add(new Product(
+                metric.Sku,
+                $"Ozon SKU {metric.Sku}",
+                0,
+                0,
+                0,
+                metric.CommissionExpense,
+                metric.LogisticsExpense,
+                metric.ServicesExpense,
+                metric.ReturnExpense,
                 0,
                 0,
                 0));
@@ -655,10 +764,127 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         return result;
     }
 
+    private static IReadOnlyList<OzonFinanceMetrics> ParseOzonFinanceMetrics(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var operations = GetFinanceOperationsArray(document.RootElement);
+        if (operations.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var result = new List<OzonFinanceMetrics>();
+        foreach (var operation in operations.EnumerateArray())
+        {
+            var skus = GetOperationSkus(operation);
+            if (skus.Count == 0)
+            {
+                continue;
+            }
+
+            var divisor = skus.Count;
+            var commission = Math.Abs(Math.Min(0, GetDecimal(operation, "sale_commission"))) / divisor;
+            var services = GetServicesExpense(operation, out var logistics, out var returns) / divisor;
+
+            foreach (var sku in skus)
+            {
+                result.Add(new OzonFinanceMetrics(sku, commission, logistics / divisor, services, returns / divisor));
+            }
+        }
+
+        return result;
+    }
+
+    private static JsonElement GetFinanceOperationsArray(JsonElement root)
+    {
+        if (root.TryGetProperty("result", out var result))
+        {
+            if (result.TryGetProperty("operations", out var operations))
+            {
+                return operations;
+            }
+
+            if (result.TryGetProperty("items", out var items))
+            {
+                return items;
+            }
+        }
+
+        if (root.TryGetProperty("operations", out var rootOperations))
+        {
+            return rootOperations;
+        }
+
+        return default;
+    }
+
+    private static IReadOnlyList<string> GetOperationSkus(JsonElement operation)
+    {
+        if (!operation.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return items
+            .EnumerateArray()
+            .Select(item => FirstNotEmpty(GetString(item, "sku"), GetString(item, "offer_id")))
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static decimal GetServicesExpense(JsonElement operation, out decimal logistics, out decimal returns)
+    {
+        logistics = 0;
+        returns = 0;
+        if (!operation.TryGetProperty("services", out var services) || services.ValueKind != JsonValueKind.Array)
+        {
+            return 0;
+        }
+
+        var other = 0m;
+        foreach (var service in services.EnumerateArray())
+        {
+            var name = GetString(service, "name").ToLowerInvariant();
+            var price = Math.Abs(Math.Min(0, GetDecimal(service, "price")));
+            if (price <= 0)
+            {
+                continue;
+            }
+
+            if (name.Contains("достав") || name.Contains("delivery") || name.Contains("last mile") || name.Contains("магистраль"))
+            {
+                logistics += price;
+            }
+            else if (name.Contains("возврат") || name.Contains("return"))
+            {
+                returns += price;
+            }
+            else
+            {
+                other += price;
+            }
+        }
+
+        return other;
+    }
+
+    private static bool HasNextFinancePage(string json, int page)
+    {
+        using var document = JsonDocument.Parse(json);
+        if (!document.RootElement.TryGetProperty("result", out var result))
+        {
+            return false;
+        }
+
+        var pageCount = GetInt(result, "page_count");
+        return pageCount > page;
+    }
+
     private static Product EmptyProduct(string sku)
     {
         var value = string.IsNullOrWhiteSpace(sku) ? "unknown" : sku;
-        return new Product(value, $"Ozon SKU {value}", 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return new Product(value, $"Ozon SKU {value}", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     private static StringContent JsonContent<T>(T value)

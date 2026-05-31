@@ -23,6 +23,10 @@ type ProductMetrics = {
   stock: number;
   grossRevenue: number;
   expenses: number;
+  commissionExpense: number;
+  logisticsExpense: number;
+  servicesExpense: number;
+  returnExpense: number;
   profit: number;
   margin: number;
   stockDays: number;
@@ -462,6 +466,9 @@ function ProductTable({ products }: { products: ProductMetrics[] }) {
             <th>Артикул</th>
             <th>Продано</th>
             <th>Выручка</th>
+            <th>Комиссия</th>
+            <th>Логистика</th>
+            <th>Услуги</th>
             <th>Расходы</th>
             <th>Прибыль</th>
             <th>Маржа</th>
@@ -476,6 +483,9 @@ function ProductTable({ products }: { products: ProductMetrics[] }) {
               <td>{product.sku}</td>
               <td>{product.sold}</td>
               <td>{currency.format(product.grossRevenue)}</td>
+              <td>{currency.format(product.commissionExpense)}</td>
+              <td>{currency.format(product.logisticsExpense)}</td>
+              <td>{currency.format(product.servicesExpense + product.returnExpense)}</td>
               <td>{currency.format(product.expenses)}</td>
               <td className={product.profit >= 0 ? "positive" : "negative"}>{currency.format(product.profit)}</td>
               <td>{Math.round(product.margin * 100)}%</td>
