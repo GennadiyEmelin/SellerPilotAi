@@ -69,6 +69,9 @@ type OzonCredentialsStatus = {
   clientIdPreview: string;
 };
 
+const supportedCurrencies = ["RUB", "KZT", "USD", "EUR"] as const;
+type SupportedCurrency = (typeof supportedCurrencies)[number];
+
 function formatMoney(value: number, currencyCode = "KZT") {
   return new Intl.NumberFormat("ru-RU", {
     style: "currency",
@@ -77,11 +80,36 @@ function formatMoney(value: number, currencyCode = "KZT") {
   }).format(value);
 }
 
+function detectCurrency(): SupportedCurrency {
+  const savedCurrency = localStorage.getItem("sellerpilot.currency");
+  if (supportedCurrencies.includes(savedCurrency as SupportedCurrency)) {
+    return savedCurrency as SupportedCurrency;
+  }
+
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const locale = navigator.language || "ru-RU";
+
+  if (timezone === "Asia/Almaty" || timezone === "Asia/Aqtau" || locale.toUpperCase().includes("-KZ")) {
+    return "KZT";
+  }
+
+  if (locale.toUpperCase().includes("-US")) return "USD";
+  if (locale.toUpperCase().includes("-DE") || locale.toUpperCase().includes("-FR") || locale.toUpperCase().includes("-ES")) return "EUR";
+
+  return "RUB";
+}
+
 function App() {
   const [dashboard, setDashboard] = useDashboard();
   const [integrations, refreshIntegrations] = useIntegrations();
   const [activeSection, setActiveSection] = useState<"overview" | "integrations">("overview");
   const [filter, setFilter] = useState<"all" | "risk" | "profit">("all");
+  const [displayCurrency, setDisplayCurrency] = useState<SupportedCurrency>(() => detectCurrency());
+  const exchangeRate = useExchangeRate(dashboard?.currencyCode ?? "KZT", displayCurrency);
+
+  useEffect(() => {
+    localStorage.setItem("sellerpilot.currency", displayCurrency);
+  }, [displayCurrency]);
 
   if (!dashboard) {
     return (
@@ -97,6 +125,8 @@ function App() {
     if (filter === "profit") return product.profit > 0 && product.signal === "good";
     return true;
   });
+  const convert = (value: number) => value * exchangeRate;
+  const recommendations = buildDisplayRecommendations(dashboard.products, displayCurrency, exchangeRate);
 
   return (
     <main className="app">
@@ -141,6 +171,16 @@ function App() {
             <h1>Что сделать сегодня, чтобы прибыль не просела</h1>
           </div>
           <div className="actions">
+            <label className="currencyControl">
+              <span>Валюта</span>
+              <select value={displayCurrency} onChange={(event) => setDisplayCurrency(event.target.value as SupportedCurrency)}>
+                {supportedCurrencies.map((currency) => (
+                  <option value={currency} key={currency}>
+                    {currency}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button className="ghostButton" onClick={() => setDashboard(null)}>
               <BarChart3 aria-hidden="true" />
               Обновить расчет
@@ -153,10 +193,10 @@ function App() {
         </header>
 
         <section className="metrics" aria-label="Ключевые показатели">
-          <Metric label="Выручка" value={formatMoney(dashboard.revenue, dashboard.currencyCode)} note="за 30 дней" />
+          <Metric label="Выручка" value={formatMoney(convert(dashboard.revenue), displayCurrency)} note="за 30 дней" />
           <Metric
             label="Чистая прибыль"
-            value={formatMoney(dashboard.profit, dashboard.currencyCode)}
+            value={formatMoney(convert(dashboard.profit), displayCurrency)}
             note={dashboard.profit > 0 ? "бизнес в плюсе" : "нужно срочно резать расходы"}
           />
           <Metric label="Средняя маржа" value={`${Math.round(dashboard.margin * 100)}%`} note="по активным SKU" />
@@ -189,7 +229,7 @@ function App() {
           <article className="panel">
             <SectionHeading eyebrow="AI-помощник" title="Рекомендации на сегодня" live />
             <div className="recommendations">
-              {dashboard.recommendations.map((item) => (
+              {recommendations.map((item) => (
                 <div className={`recommendation ${item.level}`} key={item.title}>
                   <strong>{item.title}</strong>
                   <p>{item.text}</p>
@@ -232,13 +272,85 @@ function App() {
               </button>
             </div>
           </div>
-          <ProductTable products={filteredProducts} currencyCode={dashboard.currencyCode} />
+          <ProductTable products={filteredProducts} currencyCode={displayCurrency} exchangeRate={exchangeRate} />
         </section>
           </>
         )}
       </section>
     </main>
   );
+}
+
+function useExchangeRate(sourceCurrency: string, displayCurrency: string) {
+  const [rate, setRate] = useState(1);
+
+  useEffect(() => {
+    if (!sourceCurrency || sourceCurrency === displayCurrency) {
+      setRate(1);
+      return;
+    }
+
+    let alive = true;
+    fetch(`/api/currency/rate?from=${encodeURIComponent(sourceCurrency)}&to=${encodeURIComponent(displayCurrency)}`)
+      .then((response) => {
+        if (!response.ok) throw new Error("Currency request failed");
+        return response.json() as Promise<{ rate: number }>;
+      })
+      .then((data) => {
+        if (alive) setRate(data.rate || 1);
+      })
+      .catch(() => {
+        if (alive) setRate(1);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [sourceCurrency, displayCurrency]);
+
+  return rate;
+}
+
+function buildDisplayRecommendations(
+  products: ProductMetrics[],
+  currencyCode: SupportedCurrency,
+  exchangeRate: number
+): Recommendation[] {
+  if (products.length === 0) {
+    return [
+      {
+        level: "medium",
+        title: "Нет товаров из Ozon",
+        text: "Проверьте ключи Ozon и права API. После успешного подключения здесь появятся рекомендации по реальным товарам."
+      }
+    ];
+  }
+
+  const lowMargin = [...products].sort((left, right) => left.margin - right.margin)[0];
+  const stockout = [...products].sort((left, right) => left.stockDays - right.stockDays)[0];
+  const best = [...products].sort((left, right) => right.profit - left.profit)[0];
+  const convert = (value: number) => value * exchangeRate;
+
+  return [
+    {
+      level: lowMargin.profit < 0 ? "high" : "medium",
+      title: `Проверьте цену и рекламу: ${lowMargin.name}`,
+      text: `Маржа ${Math.round(lowMargin.margin * 100)}%, прибыль ${formatMoney(
+        convert(lowMargin.profit),
+        currencyCode
+      )}. Поднимите цену минимум на ${formatMoney(convert(Math.max(40, lowMargin.price * 0.08)), currencyCode)}.`
+    },
+    {
+      level: stockout.stockDays < 7 ? "high" : "medium",
+      title: `Риск закончить остатки: ${stockout.name}`,
+      text: `Остатка хватит примерно на ${Math.max(1, Math.round(stockout.stockDays))} дн. Подготовьте поставку, чтобы не потерять позицию в выдаче.`
+    },
+    {
+      level: "good",
+      title: `Масштабируйте прибыльный SKU: ${best.name}`,
+      text: `Товар дал ${formatMoney(convert(best.profit), currencyCode)} прибыли. Можно аккуратно увеличить рекламный лимит и проверить допоставку.`
+    }
+  ];
 }
 
 function useDashboard(): [DashboardResponse | null, (value: DashboardResponse | null) => void] {
@@ -445,7 +557,15 @@ function SectionHeading({ eyebrow, title, live = false }: { eyebrow: string; tit
   );
 }
 
-function ProductTable({ products, currencyCode }: { products: ProductMetrics[]; currencyCode: string }) {
+function ProductTable({
+  products,
+  currencyCode,
+  exchangeRate
+}: {
+  products: ProductMetrics[];
+  currencyCode: string;
+  exchangeRate: number;
+}) {
   if (products.length === 0) {
     return (
       <div className="emptyState">
@@ -480,12 +600,12 @@ function ProductTable({ products, currencyCode }: { products: ProductMetrics[]; 
               <td>{product.name}</td>
               <td>{product.sku}</td>
               <td>{product.sold}</td>
-              <td>{formatMoney(product.grossRevenue, currencyCode)}</td>
-              <td>{formatMoney(product.commissionExpense, currencyCode)}</td>
-              <td>{formatMoney(product.logisticsExpense, currencyCode)}</td>
-              <td>{formatMoney(product.servicesExpense + product.returnExpense, currencyCode)}</td>
-              <td>{formatMoney(product.expenses, currencyCode)}</td>
-              <td className={product.profit >= 0 ? "positive" : "negative"}>{formatMoney(product.profit, currencyCode)}</td>
+              <td>{formatMoney(product.grossRevenue * exchangeRate, currencyCode)}</td>
+              <td>{formatMoney(product.commissionExpense * exchangeRate, currencyCode)}</td>
+              <td>{formatMoney(product.logisticsExpense * exchangeRate, currencyCode)}</td>
+              <td>{formatMoney((product.servicesExpense + product.returnExpense) * exchangeRate, currencyCode)}</td>
+              <td>{formatMoney(product.expenses * exchangeRate, currencyCode)}</td>
+              <td className={product.profit >= 0 ? "positive" : "negative"}>{formatMoney(product.profit * exchangeRate, currencyCode)}</td>
               <td>{Math.round(product.margin * 100)}%</td>
               <td>
                 {product.stock} шт. / {Math.round(product.stockDays)} дн.

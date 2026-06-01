@@ -37,7 +37,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -54,6 +55,17 @@ input {
   border-radius: 8px;
   color: var(--ink);
   background: #ffffff;
+}
+
+select {
+  min-height: 40px;
+  border: 1px solid #cfd6e3;
+  border-radius: 8px;
+  padding: 0 34px 0 12px;
+  color: var(--ink);
+  background: #ffffff;
+  font-weight: 800;
+  cursor: pointer;
 }
 
 label span {
@@ -192,6 +204,21 @@ h2 {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.currencyControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+}
+
+.currencyControl span {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .primaryButton,
@@ -577,6 +604,15 @@ td {
   .actions,
   .filters {
     justify-content: stretch;
+  }
+
+  .currencyControl {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .currencyControl select {
+    flex: 1;
   }
 
   .actions button,

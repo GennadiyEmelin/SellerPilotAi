@@ -16,6 +16,7 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<MarketplaceDataService>();
+builder.Services.AddSingleton<CurrencyRateService>();
 
 var app = builder.Build();
 
@@ -48,6 +49,12 @@ app.MapPost("/api/integrations/sync", async (MarketplaceDataService marketplaceD
 app.MapGet("/api/integrations/ozon/finance-debug", async (MarketplaceDataService marketplaceData) =>
 {
     return Results.Ok(await marketplaceData.GetOzonFinanceDebugAsync());
+});
+
+app.MapGet("/api/currency/rate", async (string from, string to, CurrencyRateService currencyRates) =>
+{
+    var rate = await currencyRates.GetRateAsync(from, to);
+    return Results.Ok(new CurrencyRateResponse(from.ToUpperInvariant(), to.ToUpperInvariant(), rate));
 });
 
 app.MapGet("/api/dashboard", async (MarketplaceDataService marketplaceData) =>
@@ -194,7 +201,7 @@ static IReadOnlyList<SellerTask> BuildTasks(IReadOnlyCollection<ProductMetrics> 
     ];
 }
 
-static string Money(decimal value) => $"{Math.Round(value):N0} ₽".Replace(",", " ");
+static string Money(decimal value) => $"{Math.Round(value):N0} ₸".Replace(",", " ");
 
 record Product(
     string Sku,
@@ -263,6 +270,8 @@ record OzonFinanceMetrics(
     decimal ReturnExpense);
 
 record OzonFinanceServiceDebug(string Name, decimal Total, int Count);
+
+record CurrencyRateResponse(string From, string To, decimal Rate);
 
 record IntegrationStatus(string Marketplace, bool Configured, bool Available, string Message);
 
@@ -1159,5 +1168,60 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
     private static string FirstNotEmpty(params string[] values)
     {
         return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "";
+    }
+}
+
+sealed class CurrencyRateService(IHttpClientFactory httpClientFactory, ILogger<CurrencyRateService> logger)
+{
+    private static readonly Dictionary<string, decimal> FallbackRates = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["KZT:RUB"] = 0.18m,
+        ["KZT:USD"] = 0.002m,
+        ["KZT:EUR"] = 0.0019m,
+        ["RUB:KZT"] = 5.55m,
+        ["USD:KZT"] = 500m,
+        ["EUR:KZT"] = 535m
+    };
+
+    public async Task<decimal> GetRateAsync(string from, string to)
+    {
+        from = Normalize(from);
+        to = Normalize(to);
+
+        if (from == to)
+        {
+            return 1;
+        }
+
+        try
+        {
+            var client = httpClientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(8);
+            var json = await client.GetStringAsync($"https://open.er-api.com/v6/latest/{from}");
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.TryGetProperty("rates", out var rates) &&
+                rates.TryGetProperty(to, out var rateElement) &&
+                rateElement.TryGetDecimal(out var rate) &&
+                rate > 0)
+            {
+                return rate;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Currency rate request failed for {From}->{To}", from, to);
+        }
+
+        if (FallbackRates.TryGetValue($"{from}:{to}", out var fallback))
+        {
+            return fallback;
+        }
+
+        return 1;
+    }
+
+    private static string Normalize(string value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? "KZT" : value.Trim().ToUpperInvariant();
     }
 }
