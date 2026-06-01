@@ -97,13 +97,10 @@ function App() {
 
   return (
     <main className="app">
-      <aside className="sidebar">
+      <header className="appHeader">
         <div className="brand">
-          <div className="brandMark">SP</div>
-          <div>
-            <strong>SellerPilot AI</strong>
-            <span>Операционный помощник</span>
-          </div>
+          <span>SellerPilot</span>
+          <strong>AI кабинет продавца</strong>
         </div>
 
         <nav className="nav" aria-label="Разделы">
@@ -121,12 +118,10 @@ function App() {
           ))}
         </nav>
 
-        <section className="sidePanel">
-          <span>Тариф</span>
-          <strong>Growth</strong>
-          <p>До 1 000 SKU, прогноз остатков, рекомендации и Telegram-уведомления.</p>
-        </section>
-      </aside>
+        <div className="headerStatus">
+          <span>{integrations.some((item) => item.available) ? "Ozon подключен" : "Ozon не подключен"}</span>
+        </div>
+      </header>
 
       <section className="workspace">
         {activeSection === "integrations" ? (
