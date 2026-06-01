@@ -253,6 +253,8 @@ record OzonSalesMetrics(string Sku, string Name, int Sold, decimal Revenue);
 
 record OzonFinanceMetrics(
     string Sku,
+    int Sold,
+    decimal Revenue,
     decimal CommissionExpense,
     decimal LogisticsExpense,
     decimal ServicesExpense,
@@ -629,6 +631,8 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
             .GroupBy(item => item.Sku, StringComparer.OrdinalIgnoreCase)
             .Select(group => new OzonFinanceMetrics(
                 group.Key,
+                group.Sum(item => item.Sold),
+                group.Sum(item => item.Revenue),
                 group.Sum(item => item.CommissionExpense),
                 group.Sum(item => item.LogisticsExpense),
                 group.Sum(item => item.ServicesExpense),
@@ -692,8 +696,8 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
 
         foreach (var product in products)
         {
-            salesBySku.TryGetValue(product.Sku, out var salesMetric);
             financeBySku.TryGetValue(product.Sku, out var financeMetric);
+            salesBySku.TryGetValue(product.Sku, out var salesMetric);
 
             if (salesMetric is null && financeMetric is null)
             {
@@ -701,10 +705,12 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
                 continue;
             }
 
-            var averagePrice = salesMetric?.Sold > 0 ? salesMetric.Revenue / salesMetric.Sold : product.Price;
+            var sold = financeMetric?.Sold > 0 ? financeMetric.Sold : salesMetric?.Sold ?? product.Sold;
+            var revenue = financeMetric?.Revenue > 0 ? financeMetric.Revenue : salesMetric?.Revenue ?? 0;
+            var averagePrice = sold > 0 && revenue > 0 ? revenue / sold : product.Price;
             merged.Add(product with
             {
-                Sold = salesMetric?.Sold ?? product.Sold,
+                Sold = sold,
                 Price = averagePrice,
                 CommissionExpense = financeMetric?.CommissionExpense ?? product.CommissionExpense,
                 LogisticsExpense = financeMetric?.LogisticsExpense ?? product.LogisticsExpense,
@@ -746,8 +752,8 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
             merged.Add(new Product(
                 metric.Sku,
                 $"Ozon SKU {metric.Sku}",
-                0,
-                0,
+                metric.Sold,
+                metric.Sold > 0 ? metric.Revenue / metric.Sold : 0,
                 0,
                 metric.CommissionExpense,
                 metric.LogisticsExpense,
@@ -816,6 +822,11 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         var result = new List<OzonFinanceMetrics>();
         foreach (var operation in operations.EnumerateArray())
         {
+            if (!IsOrderFinanceOperation(operation))
+            {
+                continue;
+            }
+
             var skus = GetOperationSkus(operation);
             if (skus.Count == 0)
             {
@@ -824,11 +835,12 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
 
             var divisor = skus.Count;
             var commission = Math.Abs(GetDecimal(operation, "sale_commission")) / divisor;
-            var services = GetServicesExpense(operation, out var logistics, out var returns);
+            var revenue = Math.Max(0, GetDecimal(operation, "accruals_for_sale")) / divisor;
+            var services = GetOrderServicesExpense(operation) / divisor;
 
             foreach (var sku in skus)
             {
-                result.Add(new OzonFinanceMetrics(sku, commission, logistics / divisor, services / divisor, returns / divisor));
+                result.Add(new OzonFinanceMetrics(sku, 1, revenue, commission, services, 0, 0));
             }
         }
 
@@ -909,66 +921,34 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
             .ToArray();
     }
 
-    private static decimal GetServicesExpense(JsonElement operation, out decimal logistics, out decimal returns)
+    private static bool IsOrderFinanceOperation(JsonElement operation)
     {
-        logistics = 0;
-        returns = 0;
+        var type = GetString(operation, "type");
+        var accrualsForSale = GetDecimal(operation, "accruals_for_sale");
+
+        return string.Equals(type, "orders", StringComparison.OrdinalIgnoreCase) && accrualsForSale > 0;
+    }
+
+    private static decimal GetOrderServicesExpense(JsonElement operation)
+    {
         if (!operation.TryGetProperty("services", out var services) || services.ValueKind != JsonValueKind.Array)
         {
             return 0;
         }
 
-        var other = 0m;
+        var total = 0m;
         foreach (var service in services.EnumerateArray())
         {
-            var name = FirstNotEmpty(GetString(service, "name"), GetString(service, "service_name")).ToLowerInvariant();
             var price = Math.Abs(GetDecimal(service, "price"));
             if (price <= 0)
             {
                 continue;
             }
 
-            if (IsReturnService(name))
-            {
-                returns += price;
-            }
-            else if (IsLogisticsService(name))
-            {
-                logistics += price;
-            }
-            else
-            {
-                other += price;
-            }
+            total += price;
         }
 
-        return other;
-    }
-
-    private static bool IsLogisticsService(string name)
-    {
-        return name.Contains("достав") ||
-               name.Contains("delivery") ||
-               name.Contains("last mile") ||
-               name.Contains("магистраль") ||
-               name.Contains("directflow") ||
-               name.Contains("direct_flow") ||
-               name.Contains("flowtrans") ||
-               name.Contains("flowlogistic") ||
-               name.Contains("delivtocustomer") ||
-               name.Contains("dropoff") ||
-               name.Contains("pickup") ||
-               name.Contains("fulfillment") ||
-               name.Contains("crossdocking");
-    }
-
-    private static bool IsReturnService(string name)
-    {
-        return name.Contains("возврат") ||
-               name.Contains("return") ||
-               name.Contains("returnflow") ||
-               name.Contains("return_flow") ||
-               name.Contains("redistributionreturns");
+        return total;
     }
 
     private static bool HasNextFinancePage(string json, int page)
