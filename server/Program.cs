@@ -45,6 +45,11 @@ app.MapPost("/api/integrations/sync", async (MarketplaceDataService marketplaceD
     return Results.Ok(result);
 });
 
+app.MapGet("/api/integrations/ozon/finance-debug", async (MarketplaceDataService marketplaceData) =>
+{
+    return Results.Ok(await marketplaceData.GetOzonFinanceDebugAsync());
+});
+
 app.MapGet("/api/dashboard", async (MarketplaceDataService marketplaceData) =>
 {
     var source = await marketplaceData.GetDashboardSourceAsync();
@@ -253,6 +258,8 @@ record OzonFinanceMetrics(
     decimal ServicesExpense,
     decimal ReturnExpense);
 
+record OzonFinanceServiceDebug(string Name, decimal Total, int Count);
+
 record IntegrationStatus(string Marketplace, bool Configured, bool Available, string Message);
 
 record SyncResult(IReadOnlyList<IntegrationStatus> Statuses, IReadOnlyList<string> ImportedItems);
@@ -280,6 +287,23 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         }
 
         return new SyncResult(statuses, importedItems);
+    }
+
+    public async Task<IReadOnlyList<OzonFinanceServiceDebug>> GetOzonFinanceDebugAsync()
+    {
+        var options = GetOzonOptions();
+        if (string.IsNullOrWhiteSpace(options.ClientId) || string.IsNullOrWhiteSpace(options.ApiKey))
+        {
+            return [];
+        }
+
+        var body = await FetchOzonFinancePageAsync(options, 1);
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return [];
+        }
+
+        return ParseOzonFinanceServiceDebug(body);
     }
 
     public OzonCredentialsStatus GetOzonCredentialsStatus()
@@ -582,28 +606,9 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
 
         for (var page = 1; page <= 10; page++)
         {
-            var request = CreateOzonRequest(options, "/v3/finance/transaction/list", new
+            var body = await FetchOzonFinancePageAsync(options, page, dateFrom, dateTo);
+            if (string.IsNullOrWhiteSpace(body))
             {
-                filter = new
-                {
-                    date = new
-                    {
-                        from = dateFrom.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                        to = dateTo.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
-                    },
-                    operation_type = Array.Empty<string>(),
-                    posting_number = "",
-                    transaction_type = "all"
-                },
-                page,
-                page_size = 1000
-            });
-
-            using var response = await httpClientFactory.CreateClient().SendAsync(request);
-            var body = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode)
-            {
-                logger.LogWarning("Ozon finance transactions failed: {StatusCode} {Body}", response.StatusCode, Trim(body));
                 break;
             }
 
@@ -629,6 +634,41 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
                 group.Sum(item => item.ServicesExpense),
                 group.Sum(item => item.ReturnExpense)))
             .ToArray();
+    }
+
+    private async Task<string> FetchOzonFinancePageAsync(OzonOptions options, int page)
+    {
+        return await FetchOzonFinancePageAsync(options, page, DateTime.UtcNow.AddDays(-30), DateTime.UtcNow);
+    }
+
+    private async Task<string> FetchOzonFinancePageAsync(OzonOptions options, int page, DateTime dateFrom, DateTime dateTo)
+    {
+        var request = CreateOzonRequest(options, "/v3/finance/transaction/list", new
+        {
+            filter = new
+            {
+                date = new
+                {
+                    from = dateFrom.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                    to = dateTo.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+                },
+                operation_type = Array.Empty<string>(),
+                posting_number = "",
+                transaction_type = "all"
+            },
+            page,
+            page_size = 1000
+        });
+
+        using var response = await httpClientFactory.CreateClient().SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            logger.LogWarning("Ozon finance transactions failed: {StatusCode} {Body}", response.StatusCode, Trim(body));
+            return "";
+        }
+
+        return body;
     }
 
     private static IReadOnlyList<Product> MergeProducts(
@@ -783,16 +823,52 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
             }
 
             var divisor = skus.Count;
-            var commission = Math.Abs(Math.Min(0, GetDecimal(operation, "sale_commission"))) / divisor;
-            var services = GetServicesExpense(operation, out var logistics, out var returns) / divisor;
+            var commission = Math.Abs(GetDecimal(operation, "sale_commission")) / divisor;
+            var services = GetServicesExpense(operation, out var logistics, out var returns);
 
             foreach (var sku in skus)
             {
-                result.Add(new OzonFinanceMetrics(sku, commission, logistics / divisor, services, returns / divisor));
+                result.Add(new OzonFinanceMetrics(sku, commission, logistics / divisor, services / divisor, returns / divisor));
             }
         }
 
         return result;
+    }
+
+    private static IReadOnlyList<OzonFinanceServiceDebug> ParseOzonFinanceServiceDebug(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var operations = GetFinanceOperationsArray(document.RootElement);
+        if (operations.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var totals = new Dictionary<string, (decimal Total, int Count)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var operation in operations.EnumerateArray())
+        {
+            if (!operation.TryGetProperty("services", out var services) || services.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (var service in services.EnumerateArray())
+            {
+                var name = FirstNotEmpty(GetString(service, "name"), GetString(service, "service_name"), "unknown");
+                var price = Math.Abs(GetDecimal(service, "price"));
+                if (!totals.TryGetValue(name, out var current))
+                {
+                    current = (0, 0);
+                }
+
+                totals[name] = (current.Total + price, current.Count + 1);
+            }
+        }
+
+        return totals
+            .OrderByDescending(item => item.Value.Total)
+            .Select(item => new OzonFinanceServiceDebug(item.Key, item.Value.Total, item.Value.Count))
+            .ToArray();
     }
 
     private static JsonElement GetFinanceOperationsArray(JsonElement root)
@@ -845,20 +921,20 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         var other = 0m;
         foreach (var service in services.EnumerateArray())
         {
-            var name = GetString(service, "name").ToLowerInvariant();
-            var price = Math.Abs(Math.Min(0, GetDecimal(service, "price")));
+            var name = FirstNotEmpty(GetString(service, "name"), GetString(service, "service_name")).ToLowerInvariant();
+            var price = Math.Abs(GetDecimal(service, "price"));
             if (price <= 0)
             {
                 continue;
             }
 
-            if (name.Contains("достав") || name.Contains("delivery") || name.Contains("last mile") || name.Contains("магистраль"))
-            {
-                logistics += price;
-            }
-            else if (name.Contains("возврат") || name.Contains("return"))
+            if (IsReturnService(name))
             {
                 returns += price;
+            }
+            else if (IsLogisticsService(name))
+            {
+                logistics += price;
             }
             else
             {
@@ -867,6 +943,32 @@ sealed class MarketplaceDataService(IHttpClientFactory httpClientFactory, IConfi
         }
 
         return other;
+    }
+
+    private static bool IsLogisticsService(string name)
+    {
+        return name.Contains("достав") ||
+               name.Contains("delivery") ||
+               name.Contains("last mile") ||
+               name.Contains("магистраль") ||
+               name.Contains("directflow") ||
+               name.Contains("direct_flow") ||
+               name.Contains("flowtrans") ||
+               name.Contains("flowlogistic") ||
+               name.Contains("delivtocustomer") ||
+               name.Contains("dropoff") ||
+               name.Contains("pickup") ||
+               name.Contains("fulfillment") ||
+               name.Contains("crossdocking");
+    }
+
+    private static bool IsReturnService(string name)
+    {
+        return name.Contains("возврат") ||
+               name.Contains("return") ||
+               name.Contains("returnflow") ||
+               name.Contains("return_flow") ||
+               name.Contains("redistributionreturns");
     }
 
     private static bool HasNextFinancePage(string json, int page)
