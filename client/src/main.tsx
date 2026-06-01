@@ -49,6 +49,7 @@ type DashboardResponse = {
   profit: number;
   margin: number;
   riskCount: number;
+  currencyCode: string;
   products: ProductMetrics[];
   recommendations: Recommendation[];
   tasks: SellerTask[];
@@ -68,11 +69,13 @@ type OzonCredentialsStatus = {
   clientIdPreview: string;
 };
 
-const currency = new Intl.NumberFormat("ru-RU", {
-  style: "currency",
-  currency: "RUB",
-  maximumFractionDigits: 0
-});
+function formatMoney(value: number, currencyCode = "KZT") {
+  return new Intl.NumberFormat("ru-RU", {
+    style: "currency",
+    currency: currencyCode,
+    maximumFractionDigits: 0
+  }).format(value);
+}
 
 function App() {
   const [dashboard, setDashboard] = useDashboard();
@@ -150,10 +153,10 @@ function App() {
         </header>
 
         <section className="metrics" aria-label="Ключевые показатели">
-          <Metric label="Выручка" value={currency.format(dashboard.revenue)} note="за 30 дней" />
+          <Metric label="Выручка" value={formatMoney(dashboard.revenue, dashboard.currencyCode)} note="за 30 дней" />
           <Metric
             label="Чистая прибыль"
-            value={currency.format(dashboard.profit)}
+            value={formatMoney(dashboard.profit, dashboard.currencyCode)}
             note={dashboard.profit > 0 ? "бизнес в плюсе" : "нужно срочно резать расходы"}
           />
           <Metric label="Средняя маржа" value={`${Math.round(dashboard.margin * 100)}%`} note="по активным SKU" />
@@ -229,7 +232,7 @@ function App() {
               </button>
             </div>
           </div>
-          <ProductTable products={filteredProducts} />
+          <ProductTable products={filteredProducts} currencyCode={dashboard.currencyCode} />
         </section>
           </>
         )}
@@ -442,7 +445,7 @@ function SectionHeading({ eyebrow, title, live = false }: { eyebrow: string; tit
   );
 }
 
-function ProductTable({ products }: { products: ProductMetrics[] }) {
+function ProductTable({ products, currencyCode }: { products: ProductMetrics[]; currencyCode: string }) {
   if (products.length === 0) {
     return (
       <div className="emptyState">
@@ -477,12 +480,12 @@ function ProductTable({ products }: { products: ProductMetrics[] }) {
               <td>{product.name}</td>
               <td>{product.sku}</td>
               <td>{product.sold}</td>
-              <td>{currency.format(product.grossRevenue)}</td>
-              <td>{currency.format(product.commissionExpense)}</td>
-              <td>{currency.format(product.logisticsExpense)}</td>
-              <td>{currency.format(product.servicesExpense + product.returnExpense)}</td>
-              <td>{currency.format(product.expenses)}</td>
-              <td className={product.profit >= 0 ? "positive" : "negative"}>{currency.format(product.profit)}</td>
+              <td>{formatMoney(product.grossRevenue, currencyCode)}</td>
+              <td>{formatMoney(product.commissionExpense, currencyCode)}</td>
+              <td>{formatMoney(product.logisticsExpense, currencyCode)}</td>
+              <td>{formatMoney(product.servicesExpense + product.returnExpense, currencyCode)}</td>
+              <td>{formatMoney(product.expenses, currencyCode)}</td>
+              <td className={product.profit >= 0 ? "positive" : "negative"}>{formatMoney(product.profit, currencyCode)}</td>
               <td>{Math.round(product.margin * 100)}%</td>
               <td>
                 {product.stock} шт. / {Math.round(product.stockDays)} дн.
@@ -519,6 +522,7 @@ const fallbackDashboard: DashboardResponse = {
   profit: 0,
   margin: 0,
   riskCount: 0,
+  currencyCode: "KZT",
   source: "ozon-not-connected",
   integrationMessages: ["Backend API недоступен"],
   recommendations: [
